@@ -14,16 +14,12 @@
 
 using namespace std;
 
-EncryptedFileReader::EncryptedFileReader(const char* file_path) : product_id_(0), offset_(0), bytes_read_(0){
+EncryptedFileReader::EncryptedFileReader(const char* file_path) : product_id_(0), offset_header_(0), offset_body_(0), bytes_read_(0), decrypt_prepared_(false){
     ERR_load_crypto_strings();
     OpenSSL_add_all_algorithms();
     OPENSSL_config(NULL);
 
-    unsigned char product_id_bytes[4];
-    const size_t size_of_enc_aes_key = 512;
-    const size_t size_of_iv = 16;
-    const size_t head_size = size_of_enc_aes_key + size_of_iv;
-    CryptoBuffer head(head_size);
+    crypto_header_.set_size(crypto_header_size_);
     {
         ifstream inf(file_path, ios::binary | ios::ate);
         if(!inf.good()){
@@ -32,32 +28,50 @@ EncryptedFileReader::EncryptedFileReader(const char* file_path) : product_id_(0)
             throw invalid_argument(ss.str());
         }
         size_t file_size = inf.tellg();
-        size_t body_size = file_size - sizeof(product_id_bytes) - head_size;
-        intermediate_.set_size(body_size);
         inf.seekg(0);
+
+        unsigned char product_id_bytes[4];
         inf.read(reinterpret_cast<char*>(product_id_bytes), sizeof(product_id_bytes));
-        inf.read(reinterpret_cast<char*>(static_cast<unsigned char*>(head)), head_size);
-        inf.read(reinterpret_cast<char*>(static_cast<unsigned char*>(intermediate_)), body_size);
+        // manually combining bytes from LE representation ... ;-)
+        product_id_ = product_id_bytes[3];
+        product_id_ = (product_id_ << 8) + product_id_bytes[2];
+        product_id_ = (product_id_ << 8) + product_id_bytes[1];
+        product_id_ = (product_id_ << 8) + product_id_bytes[0];
+
+        inf.read(reinterpret_cast<char*>(static_cast<unsigned char*>(crypto_header_)), crypto_header_size_);
+
+        unsigned char gcode_hdr_len_bytes[4];
+        inf.read(reinterpret_cast<char*>(gcode_hdr_len_bytes), sizeof(gcode_hdr_len_bytes));
+        // manually combining bytes from LE representation ... ;-)
+        size_t gcode_hdr_len = gcode_hdr_len_bytes[3];
+        gcode_hdr_len = (gcode_hdr_len << 8) + gcode_hdr_len_bytes[2];
+        gcode_hdr_len = (gcode_hdr_len << 8) + gcode_hdr_len_bytes[1];
+        gcode_hdr_len = (gcode_hdr_len << 8) + gcode_hdr_len_bytes[0];
+
+        gcode_header_.set_size(gcode_hdr_len);
+        inf.read(reinterpret_cast<char*>(static_cast<unsigned char*>(gcode_header_)), gcode_hdr_len);
+
+        size_t body_size = file_size - sizeof(product_id_bytes) - crypto_header_size_ - sizeof(gcode_hdr_len_bytes) - gcode_hdr_len;
+        gcode_body_enc_.set_size(body_size);
+        inf.read(reinterpret_cast<char*>(static_cast<unsigned char*>(gcode_body_enc_)), body_size);
     }
-
-    // manually combining bytes from LE representation ... ;-)
-    product_id_ = product_id_bytes[3];
-    product_id_ = (product_id_ << 8) + product_id_bytes[2];
-    product_id_ = (product_id_ << 8) + product_id_bytes[1];
-    product_id_ = (product_id_ << 8) + product_id_bytes[0];
-
-    CryptoHelpers::CmDecrypt(firmcode_, product_id_, head);
-
-    CryptoBuffer enc_aes_key;
-    enc_aes_key.set(head, size_of_enc_aes_key);
-    PrepareDecryptPrivate(enc_aes_key);
-
-    iv_.set(head+size_of_enc_aes_key, size_of_iv);
 }
 
 EncryptedFileReader::~EncryptedFileReader() {
     EVP_cleanup();
     ERR_free_strings();
+}
+
+void EncryptedFileReader::prepare_decrypt(){
+    CryptoHelpers::CmDecrypt(firmcode_, product_id_, crypto_header_);
+
+    CryptoBuffer enc_aes_key;
+    enc_aes_key.set(crypto_header_, size_of_enc_aes_key_);
+    PrepareDecryptPrivate(enc_aes_key);
+
+    iv_.set(crypto_header_+size_of_enc_aes_key_, size_of_iv_);
+
+    decrypt_prepared_=true;
 }
 
 bool EncryptedFileReader::ReadLine(char* buffer, size_t& size) {
@@ -123,11 +137,13 @@ bool EncryptedFileReader::ReadLine(char* buffer, size_t& size) {
 
     return rv;
 }
+
 size_t EncryptedFileReader::GetBytesRead(){
     return bytes_read_ - last_block_.size();
 }
+
 size_t EncryptedFileReader::GetBytesTotal(){
-    return intermediate_.size();
+    return gcode_body_enc_.size();
 }
 
 EncryptedFileReader* create_efr(const char* file_path, char* error_text, size_t error_text_size){

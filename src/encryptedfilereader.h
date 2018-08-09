@@ -11,19 +11,28 @@ public:
     size_t GetBytesRead();
     size_t GetBytesTotal();
 private:
+    void prepare_decrypt();
     void PrepareDecryptPrivate(const CryptoBuffer& enc_aes_key);
     bool DecryptNextBlock();
 
     unsigned long product_id_;
-    CryptoBuffer intermediate_;
+    CryptoBuffer crypto_header_;
+    CryptoBuffer gcode_header_;
+    CryptoBuffer gcode_body_enc_;
     CryptoBuffer aes_key_;
     CryptoBuffer iv_;
-    size_t offset_;
+    size_t offset_header_;
+    size_t offset_body_;
     CryptoBuffer last_block_;
     CryptoBuffer current_line_;
     size_t bytes_read_;
+    bool decrypt_prepared_;
+
     static const unsigned firmcode_ = 6000274;
     //static const unsigned firmcode_ = 6000010;
+    static const size_t size_of_enc_aes_key_ = 512;
+    static const size_t size_of_iv_ = 16;
+    static const size_t crypto_header_size_ = size_of_enc_aes_key_ + size_of_iv_;
 };
 
 extern "C"{
